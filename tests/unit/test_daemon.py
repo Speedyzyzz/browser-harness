@@ -845,3 +845,102 @@ def test_explicit_stale_session_is_not_redirected():
     assert d.cdp.calls == [
         ("Runtime.evaluate", {"expression": "1"}, "explicit-stale-session")
     ]
+
+
+def test_start_offloads_get_ws_url_to_worker_thread_without_blocking_event_loop(monkeypatch):
+    """Regression for issue #893: Daemon.start() must offload the synchronous
+    get_ws_url() call via asyncio.to_thread so the asyncio event loop is not
+    frozen while polling the CDP endpoint."""
+    import threading
+    from types import SimpleNamespace
+
+    main_thread = threading.get_ident()
+    ws_thread_ids = []
+    poller_entered = threading.Event()
+    release_poller = threading.Event()
+
+    def slow_get_ws_url():
+        ws_thread_ids.append(threading.get_ident())
+        poller_entered.set()
+        release_poller.wait(timeout=2.0)
+        return "ws://127.0.0.1:9222/devtools/browser/test"
+
+    class _DummyCDPClient:
+        def __init__(self, url):
+            self.url = url
+            self._event_registry = SimpleNamespace(handle_event=self._noop_handle)
+
+        async def _noop_handle(self, method, params, session_id=None):
+            return None
+
+        async def start(self):
+            return None
+
+    monkeypatch.setattr(daemon, "get_ws_url", slow_get_ws_url)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    monkeypatch.setattr(daemon, "CDPClient", _DummyCDPClient)
+    monkeypatch.setattr(daemon, "log", lambda _msg: None)
+
+    async def run():
+        d = daemon.Daemon()
+
+        async def fake_attach_first_page():
+            return None
+
+        d.attach_first_page = fake_attach_first_page
+        start_task = asyncio.create_task(d.start())
+
+        ticks_while_polling = 0
+        for _ in range(100):
+            await asyncio.sleep(0.005)
+            if poller_entered.is_set():
+                ticks_while_polling += 1
+                if ticks_while_polling >= 3:
+                    break
+
+        release_poller.set()
+        await start_task
+        return d, ticks_while_polling
+
+    d, ticks_while_polling = asyncio.run(run())
+
+    assert ticks_while_polling >= 3, "event loop was blocked while get_ws_url() polled"
+    assert ws_thread_ids and ws_thread_ids[0] != main_thread
+    assert d.cdp.url == "ws://127.0.0.1:9222/devtools/browser/test"
+
+
+def test_start_forwards_explicit_wait_to_get_ws_url(monkeypatch):
+    """Daemon.start(wait=...) forwards the wait window to get_ws_url(wait)."""
+    from types import SimpleNamespace
+
+    received_waits = []
+
+    def fake_get_ws_url(wait=30):
+        received_waits.append(wait)
+        return "ws://127.0.0.1:9222/devtools/browser/test"
+
+    class _DummyCDPClient:
+        def __init__(self, url):
+            self.url = url
+            self._event_registry = SimpleNamespace(handle_event=self._noop_handle)
+
+        async def _noop_handle(self, method, params, session_id=None):
+            return None
+
+        async def start(self):
+            return None
+
+    monkeypatch.setattr(daemon, "get_ws_url", fake_get_ws_url)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    monkeypatch.setattr(daemon, "CDPClient", _DummyCDPClient)
+    monkeypatch.setattr(daemon, "log", lambda _msg: None)
+
+    d = daemon.Daemon()
+
+    async def fake_attach():
+        return None
+
+    d.attach_first_page = fake_attach
+    asyncio.run(d.start(wait=7))
+
+    assert received_waits == [7]

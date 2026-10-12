@@ -810,10 +810,14 @@ def restart_daemon(name=None, require_clean=False):
             except (ProcessLookupError, OSError, SystemError, OverflowError):
                 pass
             ipc.cleanup_endpoint(name)
-            try:
-                os.unlink(pid_path)
-            except FileNotFoundError:
-                pass
+            for _ in range(10):
+                try:
+                    os.unlink(pid_path)
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    time.sleep(0.1)
         return
     # Snapshot the daemon's process start-time as a secondary identity check.
     # The IPC socket can disappear before the process exits (e.g. the shutdown
@@ -877,10 +881,14 @@ def restart_daemon(name=None, require_clean=False):
                     pass
 
     ipc.cleanup_endpoint(name)
-    try:
-        os.unlink(pid_path)
-    except FileNotFoundError:
-        pass
+    for _ in range(10):
+        try:
+            os.unlink(pid_path)
+            break
+        except FileNotFoundError:
+            break
+        except OSError:
+            time.sleep(0.1)
 
 
 def _browser_use(path, method, body=None):

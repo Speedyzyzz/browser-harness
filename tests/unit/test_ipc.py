@@ -126,3 +126,65 @@ def test_ping_returns_false_when_pong_field_is_missing_or_not_true(monkeypatch):
         assert ipc.ping("default", timeout=0.0) is False, (
             f"ping() should require pong is exactly True; got: {resp!r}"
         )
+
+
+# --- cleanup_endpoint(): transient OSError / PermissionError retries ---
+
+def test_cleanup_endpoint_retries_permission_error_and_succeeds(monkeypatch, tmp_path):
+    """Regression for issue #893: on Windows, a just-SIGTERM'd daemon may still
+    briefly hold the .port handle, causing p.unlink() to raise PermissionError
+    ([WinError 5]). cleanup_endpoint() must retry instead of crashing."""
+    port_file = tmp_path / "bu-default.port"
+    port_file.write_text('{"port":12345,"token":"tok"}')
+    real_unlink = type(port_file).unlink
+    attempts = []
+    sleeps = []
+
+    def flaky_unlink(self, *args, **kwargs):
+        attempts.append(self)
+        if len(attempts) < 4:
+            raise PermissionError(5, "Access is denied", str(self))
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(ipc, "IS_WINDOWS", True)
+    monkeypatch.setattr(ipc, "port_path", lambda _name: port_file)
+    monkeypatch.setattr(type(port_file), "unlink", flaky_unlink)
+    monkeypatch.setattr(ipc.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    ipc.cleanup_endpoint("default")
+
+    assert len(attempts) == 4
+    assert sleeps == [0.1, 0.1, 0.1]
+    assert not port_file.exists()
+
+
+def test_cleanup_endpoint_returns_immediately_on_file_not_found(monkeypatch, tmp_path):
+    missing = tmp_path / "bu-default.sock"
+    sleeps = []
+    monkeypatch.setattr(ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(ipc, "_sock_path", lambda _name: missing)
+    monkeypatch.setattr(ipc.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    ipc.cleanup_endpoint("default")
+
+    assert sleeps == []
+
+
+def test_cleanup_endpoint_swallows_persistent_oserror_after_bounded_retries(monkeypatch, tmp_path):
+    port_file = tmp_path / "bu-default.port"
+    attempts = []
+    sleeps = []
+
+    def always_locked(self, *args, **kwargs):
+        attempts.append(self)
+        raise PermissionError(5, "Access is denied", str(self))
+
+    monkeypatch.setattr(ipc, "IS_WINDOWS", True)
+    monkeypatch.setattr(ipc, "port_path", lambda _name: port_file)
+    monkeypatch.setattr(type(port_file), "unlink", always_locked)
+    monkeypatch.setattr(ipc.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    ipc.cleanup_endpoint("default")
+
+    assert len(attempts) == 10
+    assert sleeps == [0.1] * 10

@@ -1,5 +1,5 @@
 """Daemon IPC plumbing. AF_UNIX socket on POSIX, TCP loopback on Windows."""
-import asyncio, json, os, re, secrets, socket, subprocess, sys
+import asyncio, json, os, re, secrets, socket, subprocess, sys, time
 from pathlib import Path
 
 from . import paths
@@ -197,5 +197,11 @@ def expected_token():
 
 def cleanup_endpoint(name):  # best-effort; silent if already gone
     p = _sock_path(name) if not IS_WINDOWS else port_path(name)
-    try: p.unlink()
-    except FileNotFoundError: pass
+    for _ in range(10):
+        try:
+            p.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError:  # PermissionError: handle not yet released after SIGTERM
+            time.sleep(0.1)
