@@ -261,14 +261,15 @@ def _ws_from_devtools_active_port(http_url: str) -> str | None:
     return None
 
 
-def get_ws_url(wait=30):
+def get_ws_url(wait=None):
+    timeout = 30 if wait is None else wait
     if url := os.environ.get("BU_CDP_WS"):
         return url
     if url := os.environ.get("BU_CDP_URL"):
         # HTTP DevTools endpoint (e.g. http://127.0.0.1:9333) — resolve to ws via /json/version.
         # Use this for a dedicated automation Chrome on a non-default profile, which avoids the
         # M144 "Allow remote debugging" dialog and the M136 default-profile lockdown.
-        deadline = time.time() + wait
+        deadline = time.time() + timeout
         last_err = None
         base_url = url.rstrip("/")
         while (remaining := deadline - time.time()) > 0:
@@ -288,8 +289,8 @@ def get_ws_url(wait=30):
         hint = "is the dedicated automation Chrome running? Launch it with --remote-debugging-port=<port> --user-data-dir=<dedicated dir>"
         if platform.system() == "Windows":
             hint += "; on Windows also check that a firewall/antivirus isn't blocking localhost connections"
-        raise RuntimeError(f"BU_CDP_URL={url} unreachable after {wait}s: {last_err} -- {hint}")
-    deadline = time.time() + wait
+        raise RuntimeError(f"BU_CDP_URL={url} unreachable after {timeout}s: {last_err} -- {hint}")
+    deadline = time.time() + timeout
     next_liveness_check = 0.0
     while time.time() < deadline:
         for base in PROFILES:
@@ -326,7 +327,7 @@ def get_ws_url(wait=30):
             next_liveness_check = now + 2
         # The browser is running but the port isn't up; waiting 30s
         grace = TOGGLE_BOOT_GRACE if remote_debugging_toggle_profiles() else NO_TOGGLE_GRACE
-        if now > deadline - min(wait, 30) + grace:
+        if wait is None and now > deadline - 30 + grace:
             break
         time.sleep(0.2)
     for probe_port in (9222, 9223):

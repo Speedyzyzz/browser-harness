@@ -981,8 +981,9 @@ def test_get_ws_url_bu_cdp_url_caps_request_timeout_and_retry_sleep_by_remaining
 
 
 def test_get_ws_url_local_profile_honors_larger_wait_beyond_default_window(monkeypatch, tmp_path):
-    """When a caller passes wait > 30 (e.g. wait=60), the local profile polling
-    loop must extend the grace window by (wait - 30) instead of breaking at ~3s."""
+    """When a caller passes an explicit wait (e.g. wait=60 or wait=20), the
+    local profile polling loop must honor the full configured window rather
+    than breaking early at the default grace cutoff (~3-12s or 30+grace)."""
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.setattr(daemon, "PROFILES", [tmp_path])
@@ -996,7 +997,7 @@ def test_get_ws_url_local_profile_honors_larger_wait_beyond_default_window(monke
 
     def fake_sleep(seconds):
         now[0] += seconds
-        if now[0] >= 110.0 and not (tmp_path / "DevToolsActivePort").exists():
+        if now[0] >= 145.0 and not (tmp_path / "DevToolsActivePort").exists():
             (tmp_path / "DevToolsActivePort").write_text("9222\n/devtools/browser/late-boot\n")
 
     class _FakeResp:
@@ -1008,5 +1009,24 @@ def test_get_ws_url_local_profile_honors_larger_wait_beyond_default_window(monke
     monkeypatch.setattr(daemon.urllib.request, "urlopen", lambda _url, timeout=1: _FakeResp())
 
     assert daemon.get_ws_url(wait=60) == "ws://127.0.0.1:9222/devtools/browser/late-boot"
-    assert now[0] >= 110.0
+    assert now[0] >= 145.0
+
+    # Also verify an explicit wait=20 (> grace, < 30) polls past the 3s/12s grace window
+    (tmp_path / "DevToolsActivePort").unlink()
+    now[0] = 200.0
+
+    def fake_sleep_20(seconds):
+        now[0] += seconds
+        if now[0] >= 215.0 and not (tmp_path / "DevToolsActivePort").exists():
+            (tmp_path / "DevToolsActivePort").write_text("9222\n/devtools/browser/mid-boot\n")
+
+    class _FakeResp20:
+        def read(self):
+            return b'{"webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/mid-boot"}'
+
+    monkeypatch.setattr(daemon.time, "sleep", fake_sleep_20)
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", lambda _url, timeout=1: _FakeResp20())
+
+    assert daemon.get_ws_url(wait=20) == "ws://127.0.0.1:9222/devtools/browser/mid-boot"
+    assert now[0] >= 215.0
 
