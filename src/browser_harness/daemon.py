@@ -306,8 +306,11 @@ def get_ws_url(wait=None):
             # alongside the port in DevToolsActivePort: if Chrome was previously launched
             # with a different --user-data-dir on the same port, that file is left behind
             # with a stale browser UUID and the WS upgrade returns 404.
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
             try:
-                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read())["webSocketDebuggerUrl"]
+                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=min(1, remaining)).read())["webSocketDebuggerUrl"]
             except urllib.error.HTTPError as e:
                 if e.code == 403:
                     raise RuntimeError("permission-blocked: Chrome is reachable, but the per-session Allow remote debugging popup has not been accepted")
@@ -329,10 +332,15 @@ def get_ws_url(wait=None):
         grace = TOGGLE_BOOT_GRACE if remote_debugging_toggle_profiles() else NO_TOGGLE_GRACE
         if wait is None and now > deadline - 30 + grace:
             break
-        time.sleep(0.2)
+        sleep_for = min(0.2, deadline - time.time())
+        if sleep_for > 0:
+            time.sleep(sleep_for)
     for probe_port in (9222, 9223):
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{probe_port}/json/version", timeout=1) as r:
+            with urllib.request.urlopen(f"http://127.0.0.1:{probe_port}/json/version", timeout=min(1, remaining)) as r:
                 return json.loads(r.read())["webSocketDebuggerUrl"]
         except urllib.error.HTTPError as e:
             if e.code == 403:

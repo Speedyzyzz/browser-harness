@@ -1030,3 +1030,52 @@ def test_get_ws_url_local_profile_honors_larger_wait_beyond_default_window(monke
     assert daemon.get_ws_url(wait=20) == "ws://127.0.0.1:9222/devtools/browser/mid-boot"
     assert now[0] >= 215.0
 
+
+def test_get_ws_url_local_profile_caps_probes_and_skips_fallbacks_after_deadline(monkeypatch, tmp_path):
+    """Explicit local waits must cap profile HTTP probes and retry sleeps to the
+    remaining budget and skip additional profile/fallback probes once the
+    deadline expires."""
+    monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.delenv("BU_CDP_URL", raising=False)
+    p1 = tmp_path / "profile1"
+    p2 = tmp_path / "profile2"
+    p1.mkdir()
+    p2.mkdir()
+    (p1 / "DevToolsActivePort").write_text("9224\n/devtools/browser/stale-1\n")
+    (p2 / "DevToolsActivePort").write_text("9225\n/devtools/browser/stale-2\n")
+    monkeypatch.setattr(daemon, "PROFILES", [p1, p2])
+    monkeypatch.setattr(daemon, "supported_browser_running", lambda: True)
+    monkeypatch.setattr(daemon, "remote_debugging_toggle_profiles", lambda: [])
+    monkeypatch.setattr(daemon, "remote_debugging_user_enabled", lambda: True)
+
+    now = [100.0]
+    calls = []
+    sleeps = []
+
+    def fake_time():
+        return now[0]
+
+    def fake_sleep(seconds):
+        sleeps.append(round(seconds, 6))
+        now[0] += seconds
+
+    def fake_urlopen(url, timeout=1):
+        calls.append((url, round(timeout, 6)))
+        now[0] += timeout
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(daemon.time, "time", fake_time)
+    monkeypatch.setattr(daemon.time, "sleep", fake_sleep)
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="DevToolsActivePort not found"):
+        daemon.get_ws_url(wait=1.3)
+
+    assert calls == [
+        ("http://127.0.0.1:9224/json/version", 1.0),
+        ("http://127.0.0.1:9225/json/version", 0.3),
+    ]
+    assert sleeps == []
+    assert round(now[0] - 100.0, 6) == 1.3
+
+
