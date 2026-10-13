@@ -944,3 +944,69 @@ def test_start_forwards_explicit_wait_to_get_ws_url(monkeypatch):
     asyncio.run(d.start(wait=7))
 
     assert received_waits == [7]
+
+
+def test_get_ws_url_bu_cdp_url_caps_request_timeout_and_retry_sleep_by_remaining_wait(monkeypatch):
+    """BU_CDP_URL polling must cap socket timeouts and retry sleeps to the
+    remaining time before `deadline` so `wait` acts as a true upper bound."""
+    monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9333")
+
+    now = [100.0]
+    timeouts = []
+    sleeps = []
+
+    def fake_time():
+        return now[0]
+
+    def fake_sleep(seconds):
+        sleeps.append(round(seconds, 6))
+        now[0] += seconds
+
+    def fake_urlopen(_url, timeout=5):
+        timeouts.append(round(timeout, 6))
+        now[0] += 1.2
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(daemon.time, "time", fake_time)
+    monkeypatch.setattr(daemon.time, "sleep", fake_sleep)
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="unreachable after 1.5s"):
+        daemon.get_ws_url(wait=1.5)
+
+    assert timeouts == [1.5]
+    assert sleeps == [0.3]
+    assert round(now[0] - 100.0, 6) == 1.5
+
+
+def test_get_ws_url_local_profile_honors_larger_wait_beyond_default_window(monkeypatch, tmp_path):
+    """When a caller passes wait > 30 (e.g. wait=60), the local profile polling
+    loop must extend the grace window by (wait - 30) instead of breaking at ~3s."""
+    monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.delenv("BU_CDP_URL", raising=False)
+    monkeypatch.setattr(daemon, "PROFILES", [tmp_path])
+    monkeypatch.setattr(daemon, "supported_browser_running", lambda: True)
+    monkeypatch.setattr(daemon, "remote_debugging_toggle_profiles", lambda: [])
+
+    now = [100.0]
+
+    def fake_time():
+        return now[0]
+
+    def fake_sleep(seconds):
+        now[0] += seconds
+        if now[0] >= 110.0 and not (tmp_path / "DevToolsActivePort").exists():
+            (tmp_path / "DevToolsActivePort").write_text("9222\n/devtools/browser/late-boot\n")
+
+    class _FakeResp:
+        def read(self):
+            return b'{"webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/late-boot"}'
+
+    monkeypatch.setattr(daemon.time, "time", fake_time)
+    monkeypatch.setattr(daemon.time, "sleep", fake_sleep)
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", lambda _url, timeout=1: _FakeResp())
+
+    assert daemon.get_ws_url(wait=60) == "ws://127.0.0.1:9222/devtools/browser/late-boot"
+    assert now[0] >= 110.0
+

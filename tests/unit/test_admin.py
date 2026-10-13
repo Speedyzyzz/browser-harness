@@ -1499,7 +1499,7 @@ def test_restart_daemon_swallows_persistent_pid_unlink_oserror(tmp_path, monkeyp
     admin.restart_daemon("default")
 
     assert len(attempts) == 10
-    assert sleeps == [0.1] * 10
+    assert sleeps == [0.1] * 9
 
 
 def test_restart_daemon_pending_branch_retries_pid_unlink_on_permission_error(tmp_path, monkeypatch):

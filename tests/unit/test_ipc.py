@@ -172,6 +172,7 @@ def test_cleanup_endpoint_returns_immediately_on_file_not_found(monkeypatch, tmp
 
 def test_cleanup_endpoint_swallows_persistent_oserror_after_bounded_retries(monkeypatch, tmp_path):
     port_file = tmp_path / "bu-default.port"
+    port_file.write_text('{"port":12345,"token":"tok"}')
     attempts = []
     sleeps = []
 
@@ -187,4 +188,35 @@ def test_cleanup_endpoint_swallows_persistent_oserror_after_bounded_retries(monk
     ipc.cleanup_endpoint("default")
 
     assert len(attempts) == 10
-    assert sleeps == [0.1] * 10
+    assert sleeps == [0.1] * 9
+
+
+def test_cleanup_endpoint_does_not_unlink_successor_endpoint_published_during_retry(monkeypatch, tmp_path):
+    """If a concurrent startup publishes a new .port file after a transient
+    Windows sharing error, cleanup_endpoint() must not unlink the successor's
+    endpoint on subsequent retry attempts."""
+    port_file = tmp_path / "bu-default.port"
+    port_file.write_text('{"port":12345,"token":"old-tok"}')
+    real_unlink = type(port_file).unlink
+    attempts = []
+
+    def flaky_unlink(self, *args, **kwargs):
+        attempts.append(self.read_text(encoding="utf-8"))
+        if len(attempts) == 1:
+            raise PermissionError(5, "Access is denied", str(self))
+        return real_unlink(self, *args, **kwargs)
+
+    def publish_successor_during_sleep(_seconds):
+        port_file.write_text('{"port":54321,"token":"new-tok"}')
+
+    monkeypatch.setattr(ipc, "IS_WINDOWS", True)
+    monkeypatch.setattr(ipc, "port_path", lambda _name: port_file)
+    monkeypatch.setattr(type(port_file), "unlink", flaky_unlink)
+    monkeypatch.setattr(ipc.time, "sleep", publish_successor_during_sleep)
+
+    ipc.cleanup_endpoint("default")
+
+    assert len(attempts) == 1
+    assert port_file.exists()
+    assert port_file.read_text(encoding="utf-8") == '{"port":54321,"token":"new-tok"}'
+

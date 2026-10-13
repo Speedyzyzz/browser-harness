@@ -271,19 +271,20 @@ def get_ws_url(wait=30):
         deadline = time.time() + wait
         last_err = None
         base_url = url.rstrip("/")
-        while time.time() < deadline:
+        while (remaining := deadline - time.time()) > 0:
             try:
-                return json.loads(urllib.request.urlopen(f"{base_url}/json/version", timeout=5).read())["webSocketDebuggerUrl"]
+                return json.loads(urllib.request.urlopen(f"{base_url}/json/version", timeout=min(5, remaining)).read())["webSocketDebuggerUrl"]
             except urllib.error.HTTPError as e:
                 last_err = e
                 if e.code == 403:
                     raise RuntimeError("permission-blocked: Chrome is reachable, but the per-session Allow remote debugging popup has not been accepted")
                 if e.code == 404 and (ws := _ws_from_devtools_active_port(url)):
                     return ws
-                time.sleep(1)
             except Exception as e:
                 last_err = e
-                time.sleep(1)
+            sleep_for = min(1, deadline - time.time())
+            if sleep_for > 0:
+                time.sleep(sleep_for)
         hint = "is the dedicated automation Chrome running? Launch it with --remote-debugging-port=<port> --user-data-dir=<dedicated dir>"
         if platform.system() == "Windows":
             hint += "; on Windows also check that a firewall/antivirus isn't blocking localhost connections"
@@ -325,7 +326,7 @@ def get_ws_url(wait=30):
             next_liveness_check = now + 2
         # The browser is running but the port isn't up; waiting 30s
         grace = TOGGLE_BOOT_GRACE if remote_debugging_toggle_profiles() else NO_TOGGLE_GRACE
-        if now > deadline - wait + grace:
+        if now > deadline - min(wait, 30) + grace:
             break
         time.sleep(0.2)
     for probe_port in (9222, 9223):
